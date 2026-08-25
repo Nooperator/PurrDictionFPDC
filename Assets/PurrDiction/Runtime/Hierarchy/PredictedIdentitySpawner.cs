@@ -45,6 +45,12 @@ namespace PurrNet.Prediction
         {
             if (!predictionManager.IsObserver(player)) return;
 
+            if (_serverHierarchy == null)
+                TryToPopulateHierarchy(true, out _serverHierarchy);
+
+            if (_serverHierarchy == null)
+                return;
+
             for (int i = 0; i < _identitiesToSpawn.Length; i++)
             {
                 var identity = _identitiesToSpawn[i];
@@ -53,6 +59,27 @@ namespace PurrNet.Prediction
 
                 _serverHierarchy.ManualAddObserver(identity, player);
             }
+        }
+
+        internal bool OwnsManualRoot(NetworkIdentity root)
+        {
+            if (!root)
+                return false;
+
+            for (int i = 0; i < _identitiesToSpawn.Length; i++)
+            {
+                var identity = _identitiesToSpawn[i];
+                if (identity && identity.GetRootIdentity() == root)
+                    return true;
+            }
+
+            return false;
+        }
+
+        internal void RefreshHierarchies()
+        {
+            TryToPopulateHierarchy(true, out _serverHierarchy);
+            TryToPopulateHierarchy(false, out _clientHierarchy);
         }
 
         protected override void Destroyed()

@@ -136,6 +136,17 @@ public class PredictionBootstrap : Scenario
             return;
         }
 
+        if (CommandLineUtils.HasFlag("-hostMigrationScenarioOnly"))
+        {
+            _scenarios = new Scenario[]
+            {
+                this,
+                gameObject.AddComponent<HostMigrationWorldScenario>()
+            };
+            _results = new ScenarioDetails?[_scenarios.Length];
+            return;
+        }
+
         if (CommandLineUtils.HasFlag("-includeHistoryStressScenario"))
             gameObject.AddComponent<HistoryStressScenario>();
 

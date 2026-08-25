@@ -17,7 +17,7 @@ namespace PurrNet.Prediction
 {
     [DefaultExecutionOrder(1000)]
     [AddComponentMenu("PurrDiction/Prediction Manager")]
-    public partial class PredictionManager : NetworkIdentity
+    public partial class PredictionManager : NetworkIdentity, IHostMigrationManualHierarchyParticipant
     {
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterAssembliesLoaded)]
         static void Initialize() => _instances.Clear();
@@ -357,6 +357,9 @@ namespace PurrNet.Prediction
                 _tickManager = null;
             }
 
+            if (networkManager)
+                networkManager.onHostMigrationPlayerReady -= OnHostMigrationPlayerReady;
+
             CleanupAllSystems();
         }
 
@@ -674,6 +677,59 @@ namespace PurrNet.Prediction
                 return;
 
             _pendingFullSync.Add(player);
+        }
+
+        public bool OwnsHostMigrationManualRoot(NetworkIdentity root)
+        {
+            for (var i = 0; i < _systems.Count; i++)
+            {
+                if (_systems[i] is PredictedIdentitySpawner spawner && spawner &&
+                    spawner.OwnsManualRoot(root))
+                    return true;
+            }
+
+            return false;
+        }
+
+        public void BeginHostMigrationReconciliation(HostMigrationTransitionOptions transition)
+        {
+            RefreshSpawnerHierarchies();
+        }
+
+        public Task ReconcileHostMigrationAsync(HostMigrationTransitionOptions transition)
+        {
+            return Task.CompletedTask;
+        }
+
+        protected override void PromoteToServer()
+        {
+            RefreshSpawnerHierarchies();
+
+            var manager = networkManager;
+            if (manager)
+            {
+                manager.onHostMigrationPlayerReady -= OnHostMigrationPlayerReady;
+                manager.onHostMigrationPlayerReady += OnHostMigrationPlayerReady;
+            }
+        }
+
+        private void OnHostMigrationPlayerReady(PlayerID player,
+            HostMigrationTransitionOptions transition)
+        {
+            for (var i = 0; i < _systems.Count; i++)
+            {
+                if (_systems[i] is PredictedIdentitySpawner spawner && spawner)
+                    spawner.ClientRequestedToBeObserver(player);
+            }
+        }
+
+        private void RefreshSpawnerHierarchies()
+        {
+            for (var i = 0; i < _systems.Count; i++)
+            {
+                if (_systems[i] is PredictedIdentitySpawner spawner && spawner)
+                    spawner.RefreshHierarchies();
+            }
         }
 
         private void FlushPendingFullSyncs()

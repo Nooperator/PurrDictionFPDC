@@ -1913,6 +1913,29 @@ namespace PurrNet.Prediction
         /// </summary>
         public bool isCatchingUpFrames { get; private set; }
 
+        internal CatchUpFrameScope BeginCatchUpFrames()
+        {
+            return new CatchUpFrameScope(this);
+        }
+
+        internal readonly struct CatchUpFrameScope : IDisposable
+        {
+            private readonly PredictionManager _manager;
+            private readonly bool _previousValue;
+
+            public CatchUpFrameScope(PredictionManager manager)
+            {
+                _manager = manager;
+                _previousValue = manager.isCatchingUpFrames;
+                manager.isCatchingUpFrames = true;
+            }
+
+            public void Dispose()
+            {
+                _manager.isCatchingUpFrames = _previousValue;
+            }
+        }
+
         /// <summary>
         /// True when one-shot, user-facing reactions (VFX, SFX, scoring, UI) should run for
         /// the tick being simulated: the tick is verified and this is its first delivery,
@@ -2136,8 +2159,11 @@ namespace PurrNet.Prediction
             {
                 RollbackAllToVerified(_verifiedServerTick + 1);
 
-                for (ulong tick = _verifiedServerTick + 1; tick < serverTick; tick++)
-                    SimulateFrame(tick, HistorySaveMode.Full);
+                using (BeginCatchUpFrames())
+                {
+                    for (ulong tick = _verifiedServerTick + 1; tick < serverTick; tick++)
+                        SimulateFrame(tick, HistorySaveMode.Full);
+                }
 
                 // Applying the verified hierarchy now removes leavers only after their gap
                 // inputs were consumed, and creates entrants before their addressed state.

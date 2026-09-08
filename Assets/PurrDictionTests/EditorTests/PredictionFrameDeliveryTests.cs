@@ -1,9 +1,81 @@
 using NUnit.Framework;
+using UnityEngine;
 
 namespace PurrNet.Prediction.Tests.Editor
 {
     public sealed class PredictionFrameDeliveryTests
     {
+        [Test]
+        public void CatchUpFrameScopeMarksOnlyItsLifetimeAndSupportsNesting()
+        {
+            var gameObject = new GameObject(nameof(CatchUpFrameScopeMarksOnlyItsLifetimeAndSupportsNesting));
+            try
+            {
+                var manager = gameObject.AddComponent<PredictionManager>();
+
+                Assert.That(manager.isCatchingUpFrames, Is.False);
+                using (manager.BeginCatchUpFrames())
+                {
+                    Assert.That(manager.isCatchingUpFrames, Is.True);
+                    using (manager.BeginCatchUpFrames())
+                        Assert.That(manager.isCatchingUpFrames, Is.True);
+                    Assert.That(manager.isCatchingUpFrames, Is.True);
+                }
+                Assert.That(manager.isCatchingUpFrames, Is.False);
+            }
+            finally
+            {
+                Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void CatchUpFrameScopeRestoresStateAfterException()
+        {
+            var gameObject = new GameObject(nameof(CatchUpFrameScopeRestoresStateAfterException));
+            try
+            {
+                var manager = gameObject.AddComponent<PredictionManager>();
+
+                Assert.Throws<System.InvalidOperationException>(() =>
+                {
+                    using (manager.BeginCatchUpFrames())
+                    {
+                        Assert.That(manager.isCatchingUpFrames, Is.True);
+                        throw new System.InvalidOperationException("expected test exception");
+                    }
+                });
+
+                Assert.That(manager.isCatchingUpFrames, Is.False);
+            }
+            finally
+            {
+                Object.DestroyImmediate(gameObject);
+            }
+        }
+
+        [Test]
+        public void PredictedEventIsSuppressedDuringCatchUpFrames()
+        {
+            var gameObject = new GameObject(nameof(PredictedEventIsSuppressedDuringCatchUpFrames));
+            try
+            {
+                var manager = gameObject.AddComponent<PredictionManager>();
+                var predictedEvent = new PredictedEvent(manager, null);
+                var invocationCount = 0;
+                predictedEvent.AddListener(() => invocationCount++);
+
+                using (manager.BeginCatchUpFrames())
+                    predictedEvent.Invoke();
+
+                Assert.That(invocationCount, Is.Zero);
+            }
+            finally
+            {
+                Object.DestroyImmediate(gameObject);
+            }
+        }
+
         [Test]
         public void ReliableFrameSuppressesUntilItsTickIsAcknowledged()
         {

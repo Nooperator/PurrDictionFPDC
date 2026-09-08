@@ -136,6 +136,17 @@ public class PredictionBootstrap : Scenario
             return;
         }
 
+        if (CommandLineUtils.HasFlag("-verifiedHistoryRetirementScenarioOnly"))
+        {
+            _scenarios = new Scenario[]
+            {
+                this,
+                gameObject.AddComponent<VerifiedHistoryRetirementScenario>()
+            };
+            _results = new ScenarioDetails?[_scenarios.Length];
+            return;
+        }
+
         if (CommandLineUtils.HasFlag("-includeHistoryStressScenario"))
             gameObject.AddComponent<HistoryStressScenario>();
 

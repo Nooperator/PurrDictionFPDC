@@ -187,12 +187,16 @@ namespace PurrNet.Prediction
 
         internal interface IVerifiedStateStore
         {
+            int Count { get; }
+            int Capacity { get; }
             void Clear();
         }
 
         private sealed class VerifiedStateStore<T> : IVerifiedStateStore where T : struct, IDisposable
         {
             public readonly History<T> history;
+            public int Count => history.Count;
+            public int Capacity => history.Capacity;
 
             public VerifiedStateStore(int capacity)
             {
@@ -202,7 +206,56 @@ namespace PurrNet.Prediction
             public void Clear() => history.Clear();
         }
 
-        readonly Dictionary<(uint, PredictedComponentID, int), IVerifiedStateStore> _verifiedStores = new ();
+        internal readonly struct VerifiedHistoryDiagnostics
+        {
+            public readonly int storeCount;
+            public readonly int retiredComponentCount;
+            public readonly long storedEntryCount;
+            public readonly long entryCapacity;
+            public readonly long retirementsScheduled;
+            public readonly long retirementsCancelled;
+            public readonly long retirementsCompleted;
+            public readonly long storesDisposed;
+            public readonly bool hasFirstRetiredComponent;
+            public readonly PredictedComponentID firstRetiredComponent;
+
+            public VerifiedHistoryDiagnostics(
+                int storeCount,
+                int retiredComponentCount,
+                long storedEntryCount,
+                long entryCapacity,
+                long retirementsScheduled,
+                long retirementsCancelled,
+                long retirementsCompleted,
+                long storesDisposed,
+                bool hasFirstRetiredComponent,
+                PredictedComponentID firstRetiredComponent)
+            {
+                this.storeCount = storeCount;
+                this.retiredComponentCount = retiredComponentCount;
+                this.storedEntryCount = storedEntryCount;
+                this.entryCapacity = entryCapacity;
+                this.retirementsScheduled = retirementsScheduled;
+                this.retirementsCancelled = retirementsCancelled;
+                this.retirementsCompleted = retirementsCompleted;
+                this.storesDisposed = storesDisposed;
+                this.hasFirstRetiredComponent = hasFirstRetiredComponent;
+                this.firstRetiredComponent = firstRetiredComponent;
+            }
+        }
+
+        readonly Dictionary<(uint typeHash, PredictedComponentID componentId, int subKey), IVerifiedStateStore> _verifiedStores = new ();
+        readonly Dictionary<PredictedComponentID, ulong> _retiredVerifiedComponents = new ();
+        readonly List<PredictedComponentID> _retiredVerifiedComponentScratch = new (16);
+        readonly List<(uint typeHash, PredictedComponentID componentId, int subKey)> _verifiedStoreKeyScratch = new (16);
+        long _verifiedRetirementsScheduled;
+        long _verifiedRetirementsCancelled;
+        long _verifiedRetirementsCompleted;
+        long _verifiedStoresDisposed;
+        bool _hasFirstRetiredVerifiedComponent;
+        PredictedComponentID _firstRetiredVerifiedComponent;
+
+        internal ulong verifiedHistoryRetentionTicks => (ulong)Math.Max(1, tickRate * 10);
 
         internal History<T> GetVerifiedHistory<T>(PredictedComponentID componentId, out bool created) where T : struct, IDisposable
         {
@@ -211,6 +264,8 @@ namespace PurrNet.Prediction
 
         internal History<T> GetVerifiedHistory<T>(PredictedComponentID componentId, int subKey, out bool created) where T : struct, IDisposable
         {
+            if (_instanceMap.ContainsKey(componentId))
+                CancelVerifiedStoreRetirement(componentId);
             var key = (Hasher<T>.stableHash, componentId, subKey);
 
             if (_verifiedStores.TryGetValue(key, out var store))
@@ -225,11 +280,129 @@ namespace PurrNet.Prediction
             return newStore.history;
         }
 
+        internal VerifiedHistoryDiagnostics CaptureVerifiedHistoryDiagnostics()
+        {
+            long storedEntryCount = 0;
+            long entryCapacity = 0;
+            foreach (var store in _verifiedStores.Values)
+            {
+                storedEntryCount += store.Count;
+                entryCapacity += store.Capacity;
+            }
+
+            return new VerifiedHistoryDiagnostics(
+                _verifiedStores.Count,
+                _retiredVerifiedComponents.Count,
+                storedEntryCount,
+                entryCapacity,
+                _verifiedRetirementsScheduled,
+                _verifiedRetirementsCancelled,
+                _verifiedRetirementsCompleted,
+                _verifiedStoresDisposed,
+                _hasFirstRetiredVerifiedComponent,
+                _firstRetiredVerifiedComponent);
+        }
+
+        private bool HasVerifiedStores(PredictedComponentID componentId)
+        {
+            foreach (var key in _verifiedStores.Keys)
+            {
+                if (key.componentId.Equals(componentId))
+                    return true;
+            }
+
+            return false;
+        }
+
+        internal int CountVerifiedStores(PredictedComponentID componentId)
+        {
+            int count = 0;
+            foreach (var key in _verifiedStores.Keys)
+            {
+                if (key.componentId.Equals(componentId))
+                    count++;
+            }
+
+            return count;
+        }
+
+        private void ScheduleVerifiedStoreRetirement(PredictedComponentID componentId)
+        {
+            if (!HasVerifiedStores(componentId) || _retiredVerifiedComponents.ContainsKey(componentId))
+                return;
+
+            _retiredVerifiedComponents.Add(componentId, localTick);
+            _verifiedRetirementsScheduled++;
+            if (!_hasFirstRetiredVerifiedComponent)
+            {
+                _hasFirstRetiredVerifiedComponent = true;
+                _firstRetiredVerifiedComponent = componentId;
+            }
+        }
+
+        private void CancelVerifiedStoreRetirement(PredictedComponentID componentId)
+        {
+            if (_retiredVerifiedComponents.Remove(componentId))
+                _verifiedRetirementsCancelled++;
+        }
+
+        internal void PruneRetiredVerifiedStores(ulong currentTick)
+        {
+            if (_retiredVerifiedComponents.Count == 0)
+                return;
+
+            _retiredVerifiedComponentScratch.Clear();
+            ulong retentionTicks = verifiedHistoryRetentionTicks;
+            foreach (var pair in _retiredVerifiedComponents)
+            {
+                if (currentTick >= pair.Value && currentTick - pair.Value > retentionTicks)
+                    _retiredVerifiedComponentScratch.Add(pair.Key);
+            }
+
+            for (var i = 0; i < _retiredVerifiedComponentScratch.Count; i++)
+            {
+                var componentId = _retiredVerifiedComponentScratch[i];
+                if (_instanceMap.ContainsKey(componentId))
+                {
+                    CancelVerifiedStoreRetirement(componentId);
+                    continue;
+                }
+
+                _verifiedStoreKeyScratch.Clear();
+                foreach (var pair in _verifiedStores)
+                {
+                    if (pair.Key.componentId.Equals(componentId))
+                        _verifiedStoreKeyScratch.Add(pair.Key);
+                }
+
+                for (var keyIndex = 0; keyIndex < _verifiedStoreKeyScratch.Count; keyIndex++)
+                {
+                    var key = _verifiedStoreKeyScratch[keyIndex];
+                    if (!_verifiedStores.Remove(key, out var store))
+                        continue;
+
+                    store.Clear();
+                    _verifiedStoresDisposed++;
+                }
+
+                _retiredVerifiedComponents.Remove(componentId);
+                _verifiedRetirementsCompleted++;
+            }
+
+            _retiredVerifiedComponentScratch.Clear();
+            _verifiedStoreKeyScratch.Clear();
+        }
+
         private void ClearVerifiedStores()
         {
             foreach (var store in _verifiedStores.Values)
                 store.Clear();
             _verifiedStores.Clear();
+            _retiredVerifiedComponents.Clear();
+            _retiredVerifiedComponentScratch.Clear();
+            _verifiedStoreKeyScratch.Clear();
+            _hasFirstRetiredVerifiedComponent = false;
+            _firstRetiredVerifiedComponent = default;
         }
 
         bool ShouldRegisterSystem(BuiltInSystems system)
@@ -564,6 +737,7 @@ namespace PurrNet.Prediction
             }
 
             var pid = new PredictedComponentID(objectId, componentId);
+            CancelVerifiedStoreRetirement(pid);
             _instanceMap[pid] = system;
             system.SetSoftCorrectionReplaySimulation(false);
             system.SetSkipReplaySpawnInitialization(false);
@@ -618,12 +792,14 @@ namespace PurrNet.Prediction
             // A pooled instance keeps its old id, so an expiring pool entry can tear down an
             // identity whose id has already been re-registered to a live replacement. Only drop
             // the lookup when it still resolves to this exact identity.
+            bool removedLiveRegistration = false;
             if (_instanceMap.TryGetValue(predictedIdentity.id, out var mapped) &&
                 ReferenceEquals(mapped, predictedIdentity))
             {
                 _instanceMap.Remove(predictedIdentity.id);
                 _recordDecodeQuarantine.Remove(predictedIdentity.id);
                 _recordFailureLogAt.Remove(predictedIdentity.id);
+                removedLiveRegistration = true;
             }
 
             if (_systems.Remove(predictedIdentity))
@@ -637,6 +813,9 @@ namespace PurrNet.Prediction
                 predictedIdentity.RecordCompletedRegistrationPolicy();
                 InvalidateInputBlockCache();
             }
+
+            if (removedLiveRegistration)
+                ScheduleVerifiedStoreRetirement(predictedIdentity.id);
         }
 
         protected override void OnObserverRemoved(PlayerID player)
@@ -2479,10 +2658,13 @@ namespace PurrNet.Prediction
                 if (isClient)
                     UpdateInterpolation(false);
                 TickBandwidthProfiler.MarkEndOfTick();
-                return;
             }
+            else ProcessQueuedFrames(false);
 
-            ProcessQueuedFrames(false);
+            // Identity removal can participate in rollback and same-ID reconstruction. Keep its
+            // verified stores through the complete supported history horizon, then release them
+            // only at this stable post-tick boundary.
+            PruneRetiredVerifiedStores(localTick);
         }
 
         internal static bool ShouldApplyQueuedFramesInRenderPhase(

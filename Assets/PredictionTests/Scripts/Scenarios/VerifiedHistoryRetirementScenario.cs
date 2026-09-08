@@ -11,6 +11,8 @@ public sealed class VerifiedHistoryRetirementScenario : Scenario
     private const int StableSteps = 80;
     private const float TimeoutSeconds = 30f;
     private const int BarrierChannelBase = 940;
+    private const long MaterialDeltaBytes = 256L * 1024L;
+    private const long CumulativeRetentionBytes = 512L * 1024L;
 
     private GameObject _prefab;
     private int _prefabId;
@@ -38,6 +40,9 @@ public sealed class VerifiedHistoryRetirementScenario : Scenario
         var storeCounts = new List<int>(MeasuredCycleCount);
         var entryCounts = new List<long>(MeasuredCycleCount);
         var memoryDeltas = new List<long>(MeasuredCycleCount);
+        var postHistoryBytes = new List<long>(MeasuredCycleCount);
+        var inputPlayerCounts = new List<int>(MeasuredCycleCount);
+        var clientFrameCounts = new List<int>(MeasuredCycleCount);
 
         for (var cycle = 0; cycle < TotalCycleCount; cycle++)
         {
@@ -109,6 +114,7 @@ public sealed class VerifiedHistoryRetirementScenario : Scenario
                 return horizon;
 
             var diagnostics = manager.CaptureVerifiedHistoryDiagnostics();
+            var retention = manager.CaptureRetentionSnapshot();
             var componentId = new PredictedComponentID(objectId, 0);
             if (manager.CountVerifiedStores(componentId) != 0)
             {
@@ -127,14 +133,23 @@ public sealed class VerifiedHistoryRetirementScenario : Scenario
 
             storeCounts.Add(diagnostics.storeCount);
             entryCounts.Add(diagnostics.storedEntryCount);
-            memoryDeltas.Add(await CaptureMedianManagedBytes(ctx) - baselineMemory);
+            long managedBytes = await CaptureMedianManagedBytes(ctx);
+            postHistoryBytes.Add(managedBytes);
+            memoryDeltas.Add(managedBytes - baselineMemory);
+            inputPlayerCounts.Add(retention.serverInputPlayerCount);
+            clientFrameCounts.Add(retention.serverClientFrameCount);
         }
 
         var finalDiagnostics = manager.CaptureVerifiedHistoryDiagnostics();
+        string memoryClassification = ClassifyRetention(postHistoryBytes, out var consecutiveDeltas);
         string evidence =
             $"initialStores={initial.storeCount}; baselineStores={baseline.storeCount}; " +
             $"stores={string.Join(",", storeCounts)}; " +
             $"entries={string.Join(",", entryCounts)}; memoryDeltas={string.Join(",", memoryDeltas)}; " +
+            $"postHistoryBytes={string.Join(",", postHistoryBytes)}; " +
+            $"consecutiveDeltas={string.Join(",", consecutiveDeltas)}; " +
+            $"classification={memoryClassification}; inputPlayers={string.Join(",", inputPlayerCounts)}; " +
+            $"clientFrames={string.Join(",", clientFrameCounts)}; " +
             $"scheduled={finalDiagnostics.retirementsScheduled}; " +
             $"cancelled={finalDiagnostics.retirementsCancelled}; " +
             $"completed={finalDiagnostics.retirementsCompleted}; " +
@@ -144,12 +159,44 @@ public sealed class VerifiedHistoryRetirementScenario : Scenario
         if (storeCounts.Count != MeasuredCycleCount ||
             storeCounts.Exists(count => count != baseline.storeCount) ||
             finalDiagnostics.retiredComponentCount != 0 ||
-            finalDiagnostics.retirementsCompleted < TotalCycleCount)
+            finalDiagnostics.retirementsCompleted < TotalCycleCount ||
+            memoryClassification != "BoundedPlateau")
         {
             return ScenarioResult.Fail("verified-history stores did not return to baseline: " + evidence);
         }
 
         return ScenarioResult.Ok(evidence);
+    }
+
+    private static string ClassifyRetention(
+        IReadOnlyList<long> postHistoryBytes,
+        out List<long> consecutiveDeltas)
+    {
+        consecutiveDeltas = new List<long>(Math.Max(0, postHistoryBytes.Count - 1));
+        if (postHistoryBytes.Count != MeasuredCycleCount)
+            return "Inconclusive";
+
+        int materialPositiveDeltas = 0;
+        bool materialNegativeDelta = false;
+        for (var i = 1; i < postHistoryBytes.Count; i++)
+        {
+            long delta = postHistoryBytes[i] - postHistoryBytes[i - 1];
+            consecutiveDeltas.Add(delta);
+            if (delta > MaterialDeltaBytes)
+                materialPositiveDeltas++;
+            if (delta < -MaterialDeltaBytes)
+                materialNegativeDelta = true;
+        }
+
+        long cumulative = postHistoryBytes[postHistoryBytes.Count - 1] - postHistoryBytes[0];
+        long finalDelta = consecutiveDeltas[consecutiveDeltas.Count - 1];
+        if (materialPositiveDeltas > 0 && materialNegativeDelta)
+            return "Inconclusive";
+        if (materialPositiveDeltas >= 2 && cumulative > CumulativeRetentionBytes)
+            return "PerIncarnationRetention";
+        if (materialPositiveDeltas <= 1 && Math.Abs(finalDelta) <= MaterialDeltaBytes)
+            return "BoundedPlateau";
+        return "Inconclusive";
     }
 
     private bool TryGetOnlyIdentity(PredictionManager manager, out HistoryStressIdentity identity)

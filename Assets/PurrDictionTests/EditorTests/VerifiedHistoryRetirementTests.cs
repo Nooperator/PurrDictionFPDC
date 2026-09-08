@@ -183,6 +183,58 @@ namespace PurrNet.Prediction.Tests.Editor
             }
         }
 
+        [Test]
+        public void PublicRetentionSnapshotIsScalarReadOnlyAndTracksRetirement()
+        {
+            var managerObject = new GameObject("Retention snapshot manager");
+            var identityObject = new GameObject("Retention snapshot identity");
+            try
+            {
+                var manager = CreateManager(managerObject, 40);
+                var id = new PredictedComponentID(new PredictedObjectID(1006), 0);
+                var identity = identityObject.AddComponent<OmittedStateIdentity>();
+                identity.AttachForTest(manager, id);
+                Register(manager, identity);
+                manager.GetVerifiedHistory<OmittedState>(id, out _)
+                    .Write(1, new OmittedState { value = 6 });
+
+                var live = manager.CaptureRetentionSnapshot();
+                var repeated = manager.CaptureRetentionSnapshot();
+                Assert.That(live.systemCount, Is.EqualTo(1));
+                Assert.That(live.instanceCount, Is.EqualTo(1));
+                Assert.That(live.verifiedStoreCount, Is.EqualTo(1));
+                Assert.That(live.verifiedEntryCount, Is.EqualTo(1));
+                Assert.That(live.pendingVerifiedRetirementCount, Is.Zero);
+                Assert.That(repeated.verifiedStoreCount, Is.EqualTo(live.verifiedStoreCount));
+                Assert.That(repeated.verifiedEntryCount, Is.EqualTo(live.verifiedEntryCount));
+
+                manager.UnregisterInstance(identity);
+                var retired = manager.CaptureRetentionSnapshot();
+                Assert.That(retired.systemCount, Is.Zero);
+                Assert.That(retired.instanceCount, Is.Zero);
+                Assert.That(retired.pendingVerifiedRetirementCount, Is.EqualTo(1));
+                Assert.That(retired.verifiedRetirementsScheduled, Is.EqualTo(1));
+
+                manager.PruneRetiredVerifiedStores(402);
+                var pruned = manager.CaptureRetentionSnapshot();
+                Assert.That(pruned.verifiedStoreCount, Is.Zero);
+                Assert.That(pruned.pendingVerifiedRetirementCount, Is.Zero);
+                Assert.That(pruned.verifiedRetirementsCompleted, Is.EqualTo(1));
+                Assert.That(pruned.verifiedStoresDisposed, Is.EqualTo(1));
+
+                foreach (var field in typeof(PredictionRetentionSnapshot).GetFields())
+                {
+                    Assert.That(field.FieldType.IsPrimitive, Is.True,
+                        $"Retention snapshot field '{field.Name}' retained {field.FieldType}.");
+                }
+            }
+            finally
+            {
+                Object.DestroyImmediate(identityObject);
+                Object.DestroyImmediate(managerObject);
+            }
+        }
+
         private static PredictionManager CreateManager(GameObject managerObject, int tickRate)
         {
             var manager = managerObject.AddComponent<PredictionManager>();

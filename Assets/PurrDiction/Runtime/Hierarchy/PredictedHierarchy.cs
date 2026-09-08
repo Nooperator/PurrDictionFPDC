@@ -73,6 +73,10 @@ namespace PurrNet.Prediction
 
         readonly Stack<HashSet<PredictedObjectID>> _visibilityDependencySetPool = new ();
 
+        internal int retentionSpawnedRecordCount => _spawnedPrefabs.Count;
+        internal int retentionRecordCount => _recordsById.Count;
+        internal int retentionInstanceCount => _instanceMap.Count;
+
         void RecycleVisibilityDependencyGraph(
             Dictionary<PredictedObjectID, HashSet<PredictedObjectID>> graph)
         {
